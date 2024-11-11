@@ -20,36 +20,47 @@ class APEX {
       debug: false
     }
   ) {
-    const { onopen, onclose, onerror, defaultCallback, debug } = config;
+    this.url = url;
+    this.config = config;
     this.seq = 0;
     this.callbacks = {};
-    this.defaultCallback = defaultCallback;
-    this.debug = debug;
+    this.defaultCallback = config.defaultCallback;
+    this.debug = config.debug;
+    this.ws = null; // WebSocket will be initialized in openConnection
+  }
+
+  openConnection() {
+    const { onopen, onclose, onerror, debug } = this.config;
+
     this.ws = webSocket({
-      url,
+      url: this.url,
       WebSocketCtor: WebSocket,
       openObserver: {
-        next: onopen ? onopen : () => {}
+        next: onopen ? onopen : () => {},
       },
       errorObserver: {
-        next: onerror ? onerror : () => {}
+        next: onerror ? onerror : () => {},
       },
       closeObserver: {
-        next: onclose ? onclose : () => {}
-      }
+        next: () => {
+          onclose ? onclose() : () => {};
+          console.log('APEX: Connection closed');
+        },
+      },
     });
+
+    // Set up subscription and event filtering only if ws is initialized
     this.ws.subscribe(data => {
       if (this.callbacks[data.i]) {
         this.callbacks[data.i](data);
         delete this.callbacks[data.i];
       }
     });
-    // Just use observables rather than subjects
+
+    // Filter and map data to relevant classes
     this.Level1 = this.ws
       .filter(x => x.n === 'Level1UpdateEvent')
-      .map(({ o }) => {
-        return new Level1(JSON.parse(o));
-      });
+      .map(({ o }) => new Level1(JSON.parse(o)));
     this.Level2 = this.ws
       .filter(x => x.n === 'Level2UpdateEvent')
       .map(({ o }) => new Level2(JSON.parse(o)));
@@ -63,31 +74,39 @@ class APEX {
       .filter(x => ['OrderStateEvent'].includes(x.n))
       .map(({ o }) => new Order(JSON.parse(o)));
     this.AccountEvents = this.ws
-      .filter(x =>
-        [
-          'AccountPositionEvent',
-          'CancelAllOrdersRejectEvent',
-          'CancelOrderRejectEvent',
-          'CancelReplaceOrderRejectEvent',
-          'MarketStateUpdate',
-          'NewOrderRejectEvent',
-          'OrderStateEvent',
-          'OrderTradeEvent',
-          'OrderTradeEvent',
-          'PendingDepositUpdate',
-          'TransactionEvent'
-        ].includes(x.n)
-      )
+      .filter(x => [
+        'AccountPositionEvent',
+        'CancelAllOrdersRejectEvent',
+        'CancelOrderRejectEvent',
+        'CancelReplaceOrderRejectEvent',
+        'MarketStateUpdate',
+        'NewOrderRejectEvent',
+        'OrderStateEvent',
+        'OrderTradeEvent',
+        'OrderTradeEvent',
+        'PendingDepositUpdate',
+        'TransactionEvent',
+      ].includes(x.n))
       .map(({ o }) => JSON.parse(o));
+
+    if (debug) {
+      console.log('APEX: WebSocket connection opened');
+    }
   }
 
   RPCCall(functionName, paramObject, callback = this.defaultCallback) {
+    if (!this.ws) {
+      console.error('APEX: WebSocket connection is not open.');
+      return;
+    }
+
     const frame = {
       m: 0,
       i: this.seq,
       n: functionName,
-      o: JSON.stringify(paramObject)
+      o: JSON.stringify(paramObject),
     };
+
     if (this.debug) {
       console.log(`DBG-⬆︎: ${JSON.stringify(frame)}`);
     }
@@ -113,10 +132,16 @@ class APEX {
   }
 
   closeConnection() {
-    this.ws.socket.close();
+    if (this.ws && this.ws.socket) {
+      this.ws.socket.close();
+      console.log('APEX: WebSocket connection closed manually.');
+    } else {
+      console.log('APEX: No WebSocket connection to close.');
+    }
   }
 }
 
+// Define endpoint methods
 endpoints.forEach(endpoint => {
   APEX.prototype[endpoint] = function(
     params = {
